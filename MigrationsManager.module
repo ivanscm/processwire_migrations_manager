@@ -1,0 +1,262 @@
+<?php namespace ProcessWire;
+
+/**
+ * Created by PhpStorm.
+ * User: IvanSCM
+ * Date: 21.07.2018
+ * Time: 18:58
+ */
+class MigrationsManager extends Process
+{
+    const MIGRATIONS_DIR = 'migrations';
+    const FILENAME_CREATE_TABLE = 'create_table.sql';
+    const FILENAME_CREATE_INDEXES = 'indexes.sql';
+    const TABLE_NAME = 'module_migrations_manager';
+
+    public static function getModuleInfo()
+    {
+        return array(
+            'title' => 'Migrations Manager',
+            'version' => 1,
+            'summary' => 'Migrate fields and templates.',
+            'author' => 'IvanSCM',
+            'href' => 'https://ivanscm.name',
+            'singular' => true,
+            'autoload' => true,
+            'icon' => 'table',
+            'page' => array(
+                'name' => 'migrations',
+                'title' => 'Migrations Manager'
+            )
+        );
+    }
+
+    /** Utilities logic */
+
+    /**
+     * @return WireDatabasePDO
+     */
+    private function getDatabase()
+    {
+        return $this->wire->database;
+    }
+
+    private static function removeDirectory($dir)
+    {
+        $files = array_diff(scandir($dir), array('.', '..'));
+        foreach ($files as $file) {
+            (is_dir("$dir/$file")) ? self::removeDirectory("$dir/$file") : unlink("$dir/$file");
+        }
+        return rmdir($dir);
+    }
+
+    private function readDatabaseFile($filename)
+    {
+        return file_get_contents(__DIR__ . '/' . $filename);
+    }
+
+    private function alert($text, $type = 'warning')
+    {
+        return '<div class="uk-alert-' . $type . '" uk-alert>' .
+            '<a class="uk-alert-close" uk-close></a>' .
+            '<p>' . $this->_($text) . '</p>' .
+            '</div>';
+    }
+
+    /** Migrations logic */
+
+    private function getMigrationsPath()
+    {
+        return $this->config->paths->assets . self::MIGRATIONS_DIR . '/';
+    }
+
+    private function createMigration($object_type, $event, $object_name, $data)
+    {
+        $now = new \DateTime();
+        $file_name = "{$now->format('Y-m-d-his')}-{$object_type}-{$object_name}-{$event}.json";
+        $file_content = json_encode(array(
+            'file' => $file_name,
+            'object' => $object_type,
+            'name' => $object_name,
+            'event' => $event,
+            'migration' => $data
+        ));
+        file_put_contents($this->getMigrationsPath() . $file_name, $file_content);
+    }
+
+    private function applyMigration($migration_filename)
+    {
+        //$this->error('Test error');
+        return true;
+    }
+
+    private function applyMigrations($migrations)
+    {
+        $migrations_for_apply = array_filter($migrations, function ($val) {
+            return ($val === null);
+        });
+        if (count($migrations_for_apply) == 0) {
+            $this->warning('No migrations for use.');
+            return;
+        }
+        foreach ($migrations_for_apply as $migration_filename => $migration_executed) {
+            if ($this->applyMigration($migration_filename)) {
+                $migration_sql = sprintf("INSERT INTO %s (file, executed) VALUES('%s', '%s');", self::TABLE_NAME, $migration_filename, date_create()->format('Y-m-d H:i:s'));
+                $this->getDatabase()->query($migration_sql);
+            }
+        }
+        $this->message('Done apply migrations');
+    }
+
+    private function findMigrationsInFiles()
+    {
+        return array_diff(scandir($this->getMigrationsPath()), array('.', '..'));
+    }
+
+    private function findMigrationsInCurrentSite()
+    {
+        $migrations = array();
+        $find_migrations_sql = sprintf("SELECT * FROM %s ORDER BY id ASC", self::TABLE_NAME);
+        $migrations_in_files = $this->findMigrationsInFiles();
+        $migrations_in_database = $this->getDatabase()->query($find_migrations_sql)->fetchAll();
+        $migrations += array_column($migrations_in_database, 'executed', 'file');
+        $migrations += array_fill_keys($migrations_in_files, null);
+        ksort($migrations);
+        return $migrations;
+    }
+
+    /** Callbacks logic */
+
+    private function saveTemplate(Template $template)
+    {
+        $this->message("Debug: save template {$template->name}");
+        $this->message($template->getChanges(true));
+    }
+
+    private function saveField(Field $field)
+    {
+        $this->message($field);
+        $changes = $field->getChanges();
+        $event = ($changes) ? 'save' : 'create';
+        $this->createMigration('field', $event, $field->name, array(
+            'data' => array(
+                'description' => $field->data('description'),
+                'notes' => $field->data('notes')
+            ),
+            'settings' => array(
+                'name' => $field->name,
+                'label' => $field->label,
+                'flags' => $field->flags,
+                'typeClassName' => $field->type->className,
+            )
+        ));
+        if ($changes) {
+
+        }
+
+    }
+
+    private function deleteField(Field $field)
+    {
+        $this->createMigration('field', 'delete', $field->name, array());
+    }
+
+    /** Module logic */
+
+    public function install()
+    {
+        if (!is_dir($this->getMigrationsPath())) {
+            if (mkdir($this->getMigrationsPath())) {
+                throw new WireException($this->_('Unable to create a directory to store the migration file.'));
+            }
+        }
+
+        $database = $this->getDatabase();
+        $database->query($this->readDatabaseFile(self::FILENAME_CREATE_TABLE));
+        $database->query($this->readDatabaseFile(self::FILENAME_CREATE_INDEXES));
+    }
+
+    public function uninstall()
+    {
+    }
+
+    public function init()
+    {
+        // templates
+        $this->templates->addHookAfter('save', $this, 'onTemplateSave');
+        $this->templates->addHookAfter('clone', $this, 'onTemplateClone');
+        $this->templates->addHookAfter('delete', $this, 'onTemplateDelete');
+
+        // fields
+        $this->fields->addHookAfter('save', $this, 'onFieldSave');
+        $this->fields->addHookAfter('clone', $this, 'onFieldClone');
+        $this->fields->addHookAfter('delete', $this, 'onFieldDelete');
+    }
+
+    public function onTemplateSave($item)
+    {
+        foreach ($item['arguments'] as $argument) {
+            $this->saveTemplate($argument);
+        }
+    }
+
+    public function onFieldSave($item)
+    {
+        foreach ($item['arguments'] as $argument) {
+            $this->saveField($argument);
+        }
+    }
+
+    public function onFieldDelete($item)
+    {
+        foreach ($item['arguments'] as $argument) {
+            $this->deleteField($argument);
+        }
+    }
+
+    public function renderMigrationsTable($migrations)
+    {
+        /** @var MarkupAdminDataTable $table */
+        $table = $this->modules->get('MarkupAdminDataTable');
+        $table->headerRow(array('Filename', 'Date executed'));
+        foreach ($migrations as $migration_file => $migration_executed) {
+            $table->row(array(
+                $migration_file,
+                ($migration_executed == null) ? $this->_('New') : date_create_from_format('Y-m-d H:i:s', $migration_executed)->format('d.m.Y H:i:s')
+            ));
+        }
+        return $table->render();
+    }
+
+    public function ___execute()
+    {
+        $migrations = $this->findMigrationsInCurrentSite();
+        $migrations_table = ($migrations) ? $this->renderMigrationsTable($migrations) : $this->alert('Migrations not found.');
+
+        $buttons = '';
+
+        /** @var InputfieldSubmit $button */
+        $button = $this->modules->get('InputfieldSubmit');
+        $button->value = 'Apply migrations';
+        $button->icon = 'play';
+        $buttons .= $button->render();
+
+        /** @var InputfieldForm $form */
+        $form = $this->modules->get('InputfieldForm');
+        if ($this->input->post('submit')) {
+            $this->applyMigrations($migrations);
+        }
+        /** @var InputfieldMarkup $field */
+        $field = $this->modules->get('InputfieldMarkup');
+        $field->label = 'Actions';
+        $field->value = $buttons;
+        $form->add($field);
+        /** @var InputfieldMarkup $field */
+        $field = $this->modules->get('InputfieldMarkup');
+        $field->label = 'Migrations';
+        $field->value = $migrations_table;
+        $form->add($field);
+
+        return $form->render();
+    }
+}
