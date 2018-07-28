@@ -63,6 +63,28 @@ class MigrationsManager extends Process
             '</div>';
     }
 
+    /**
+     * @param integer $role_id
+     * @return string
+     */
+    private function extractRoleName($role_id)
+    {
+        return $this->wire->roles->get($role_id)->name;
+    }
+
+    /**
+     * @param string $key
+     * @return bool
+     */
+    private function filterSystem($key)
+    {
+        $break_settings = array('id', 'type', 'description', 'notes', 'icon', 'tags', 'requiredIf', 'required', 'columnWidth', 'showIf', 'flags');
+        if (in_array($key, $break_settings)) {
+            return false;
+        }
+        return (substr($key, 0, 1) === '_') ? false : true;
+    }
+
     /** Migrations logic */
 
     private function getMigrationsPath()
@@ -135,25 +157,35 @@ class MigrationsManager extends Process
 
     private function saveField(Field $field)
     {
-        $this->message($field);
-        $changes = $field->getChanges();
-        $event = ($changes) ? 'save' : 'create';
+        $viewRoles = array_map(array($this, 'extractRoleName'), $field->viewRoles);
+        $editRoles = array_map(array($this, 'extractRoleName'), $field->editRoles);
+        $event = ($field->getChanges()) ? 'save' : 'create';
+        $data = array_filter($field->getExportData(), array($this, 'filterSystem'), ARRAY_FILTER_USE_KEY);
         $this->createMigration('field', $event, $field->name, array(
             'data' => array(
-                'description' => $field->data('description'),
-                'notes' => $field->data('notes')
-            ),
+                    'description' => $field->data('description'),
+                    'notes' => $field->data('notes'),
+                    'columnWidth' => $field->columnWidth,
+                    'icon' => $field->icon,
+                    'required' => $field->required,
+                    'requiredIf' => $field->requiredIf,
+                    'showIf' => $field->showIf,
+                    'typeClassName' => $field->type->className,
+                    'tags' => $field->get('tags')
+                ) + $data,
             'settings' => array(
                 'name' => $field->name,
                 'label' => $field->label,
                 'flags' => $field->flags,
-                'typeClassName' => $field->type->className,
+            ),
+            'access' => array(
+                'editable' => (bool)$field->editable(),
+                'useRoles' => (bool)$field->useRoles,
+                'viewable' => (bool)$field->viewable(),
+                'viewRoles' => $viewRoles,
+                'editRoles' => $editRoles,
             )
         ));
-        if ($changes) {
-
-        }
-
     }
 
     private function deleteField(Field $field)
@@ -166,7 +198,7 @@ class MigrationsManager extends Process
     public function install()
     {
         if (!is_dir($this->getMigrationsPath())) {
-            if (mkdir($this->getMigrationsPath())) {
+            if (!mkdir($this->getMigrationsPath())) {
                 throw new WireException($this->_('Unable to create a directory to store the migration file.'));
             }
         }
